@@ -2,11 +2,13 @@
 import argparse
 import filecmp
 import json
+import math
 import re
 import tempfile
 from pathlib import Path
 
-from screening import DEFAULT_THRESHOLDS, LABELS, diagnostics, finite, flags, force_rows, model_scalars
+from screening import (DEFAULT_THRESHOLDS, LABELS, component_rms, finite, flags, force_differences,
+                       force_rows, model_scalars, scores_and_force_differences)
 
 
 def volume(cell):
@@ -117,10 +119,26 @@ def publish(directory, files):
                 raise ValueError(f"{target} already exists with different contents; use a new directory")
 
 
-def screen(first_file, second_file, directory, thresholds=DEFAULT_THRESHOLDS):
+def atom_score_rows(first, second, rankings, cutoff):
+    for record in rankings:
+        item_id = record["id"]
+        differences = force_differences(first[item_id], second[item_id])
+        symbols = first[item_id]["geometry"]["symbols"]
+        for index, (symbol, delta) in enumerate(zip(symbols, differences, strict=True), start=1):
+            rms = component_rms(delta)
+            yield {"id": item_id, "atom_index": index, "element": symbol,
+                   "delta_force_eV_A": delta, "rms_difference_eV_A": rms,
+                   "above_atom_cutoff": None if cutoff is None else rms > cutoff}
+
+
+def screen(first_file, second_file, directory, thresholds=DEFAULT_THRESHOLDS, atom_force_cutoff=None):
     thresholds = tuple(finite(t) for t in thresholds)
     if len(thresholds) != len(LABELS) or min(thresholds) <= 0:
         raise ValueError("supply four positive finite thresholds in order D_e, D_h, D_F, D_q")
+    if atom_force_cutoff is not None:
+        atom_force_cutoff = finite(atom_force_cutoff)
+        if atom_force_cutoff <= 0:
+            raise ValueError("atom force cutoff must be positive in eV/Å")
     first = read_records(first_file, "prediction")
     second = read_records(second_file, "prediction")
     if first.keys() != second.keys():
@@ -129,16 +147,55 @@ def screen(first_file, second_file, directory, thresholds=DEFAULT_THRESHOLDS):
     for item_id, a in first.items():
         b = second[item_id]
         same_geometry(a, b)
-        values = diagnostics(volume(a["geometry"]["cell_A"]), a, b)
+        values, differences = scores_and_force_differences(volume(a["geometry"]["cell_A"]), a, b)
         hits = flags(values, thresholds)
+        reasons = [k for k, hit in zip(LABELS, hits) if hit]
+        rms = [component_rms(delta) for delta in differences]
+        peak = max(range(len(rms)), key=rms.__getitem__)
+        rank_score = max(v / t for v, t in zip(values, thresholds))
+        flagged_atoms = []
+        if atom_force_cutoff is not None:
+            flagged_atoms = [i for i, value in enumerate(rms, start=1) if value > atom_force_cutoff]
+            if flagged_atoms:
+                reasons.append("atom_force")
+            rank_score = max(rank_score, rms[peak] / atom_force_cutoff)
         rankings.append({"id": item_id, **dict(zip(LABELS, values)),
-                         "triggered": [k for k, hit in zip(LABELS, hits) if hit],
-                         "rank_score": max(v / t for v, t in zip(values, thresholds))})
+                         "cell_force_rms_eV_A": math.sqrt(12 * values[2]),
+                         "max_atom_index": peak + 1, "max_atom_element": a["geometry"]["symbols"][peak],
+                         "max_atom_rms_eV_A": rms[peak], "atom_force_cutoff_eV_A": atom_force_cutoff,
+                         "triggered_atom_indices": flagged_atoms, "triggered": reasons,
+                         "rank_score": rank_score})
     rankings.sort(key=lambda x: (-x["rank_score"], x["id"]))
     selected = [geometry(first[r["id"]]) for r in rankings if r["triggered"]]
-    publish(directory, {"scores.jsonl": jsonlines(rankings), "to_label.jsonl": jsonlines(selected),
+    atoms = atom_score_rows(first, second, rankings, atom_force_cutoff)
+    publish(directory, {"scores.jsonl": jsonlines(rankings), "atom_scores.jsonl": jsonlines(atoms),
+                        "to_label.jsonl": jsonlines(selected),
                         "to_label.xyz": xyz(selected)})
     return selected
+
+
+def audit_forces(first_file, second_file, labels_file, directory):
+    """Evaluate each model's site error only after labels are available."""
+    first = read_records(first_file, "prediction")
+    second = read_records(second_file, "prediction")
+    labels = read_records(labels_file, "reference")
+
+    def records():
+        for item_id, ref in labels.items():
+            if item_id not in first or item_id not in second:
+                raise ValueError(f"{item_id}: labeled structure missing from one or both predictions")
+            errors = []
+            for model in (first[item_id], second[item_id]):
+                same_geometry(ref, model)
+                errors.append([component_rms(v) for v in force_differences(model, ref)])
+            for index, (symbol, ea, eb) in enumerate(zip(ref["geometry"]["symbols"], *errors,
+                                                        strict=True), start=1):
+                larger = "tie" if ea == eb else ("A" if ea > eb else "B")
+                yield {"id": item_id, "atom_index": index, "element": symbol,
+                       "reference_method": ref["reference_method"], "rms_error_A_eV_A": ea,
+                       "rms_error_B_eV_A": eb, "larger_error_model": larger}
+
+    publish(directory, {"atom_errors.jsonl": jsonlines(records())})
 
 
 def update(request_file, labels_file, base_file, directory):
@@ -167,17 +224,26 @@ def main():
     paired.add_argument("second_model")
     paired.add_argument("--thresholds", nargs=4, type=float, default=DEFAULT_THRESHOLDS,
                         metavar=("D_e", "D_h", "D_F", "D_q"), help="four positive variance thresholds")
+    paired.add_argument("--atom-force-cutoff", type=float, metavar="EV_PER_ANGSTROM",
+                        help="also select a structure when a site's force-component RMS exceeds this value")
+    audit = commands.add_parser("audit-forces", help="compare stored model forces with returned references by atom")
+    audit.add_argument("first_model")
+    audit.add_argument("second_model")
+    audit.add_argument("labels")
     ingest = commands.add_parser("update", help="merge returned reference labels with the base set")
     ingest.add_argument("request")
     ingest.add_argument("labels")
     ingest.add_argument("base")
-    for command in (paired, ingest):
+    for command in (paired, ingest, audit):
         command.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     try:
         if args.command == "screen":
-            chosen = screen(args.first_model, args.second_model, args.out, args.thresholds)
+            chosen = screen(args.first_model, args.second_model, args.out, args.thresholds, args.atom_force_cutoff)
             print(f"Selected {len(chosen)} configurations.")
+        elif args.command == "audit-forces":
+            audit_forces(args.first_model, args.second_model, args.labels, args.out)
+            print(f"Site errors written to {args.out / 'atom_errors.jsonl'}")
         else:
             print(f"Shared training set: {len(update(args.request, args.labels, args.base, args.out))} records.")
     except (OSError, ValueError) as err:

@@ -31,22 +31,36 @@ def model_scalars(prediction, volume, natoms):
     return e, e + q, q
 
 
-def diagnostics(volume_A3, first, second):
-    """Return D_e, D_h, D_F, D_q for two models on one cell and atom ordering."""
+def force_differences(first, second):
+    """Signed A-minus-B force vectors in eV/Å, in the input atom order."""
+    fa, fb = force_rows(first), force_rows(second)
+    if len(fb) != len(fa):
+        raise ValueError("The two models must supply the same number of forces")
+    return [tuple(a - b for a, b in zip(va, vb)) for va, vb in zip(fa, fb)]
+
+
+def component_rms(vector):
+    """RMS of the three components of one Cartesian error or difference, in eV/Å."""
+    return math.sqrt(sum(x * x for x in vector) / 3)
+
+
+def scores_and_force_differences(volume_A3, first, second):
     volume = finite(volume_A3)
     if volume <= 0:
         raise ValueError("Cell volume must be positive")
-    fa, fb = force_rows(first), force_rows(second)
-    n = len(fa)
-    if len(fb) != n:
-        raise ValueError("The two models must supply the same number of forces")
+    delta = force_differences(first, second)
+    n = len(delta)
     a = model_scalars(first, volume, n)
     b = model_scalars(second, volume, n)
     de, dh, dq = ((u - v) ** 2 / 4 for u, v in zip(a, b))
-    squared_force_difference = sum(
-        (u - v) ** 2 for row_a, row_b in zip(fa, fb) for u, v in zip(row_a, row_b)
-    )
-    return de, dh, squared_force_difference / (36 * n), dq
+    squared_force_difference = sum(x ** 2 for vector in delta for x in vector)
+    return (de, dh, squared_force_difference / (36 * n), dq), delta
+
+
+def diagnostics(volume_A3, first, second):
+    """Return the four historical cell scores in D_e, D_h, D_F, D_q order."""
+    scores, _ = scores_and_force_differences(volume_A3, first, second)
+    return scores
 
 
 def flags(scores, thresholds=DEFAULT_THRESHOLDS):

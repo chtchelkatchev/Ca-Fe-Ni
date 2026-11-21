@@ -48,6 +48,28 @@ For each model let `e = E/N`, `q = -V tr(stress)/(3N)` and `h = e + q`. For `x =
 
 Scalar thresholds are in (eV/atom)² and the force threshold is in (eV/Å)². These defaults reproduce the Ca–Fe–Ni screen. For another application, pass four positive values via `--thresholds D_e D_h D_F D_q`. Use the model-predicted stress to evaluate `q`. `scores.jsonl` records the four diagnostics, triggered criteria and maximum score divided by its own threshold. This ratio orders candidates for inspection. The threshold union determines selection.
 
+## Locate force disagreement by atom
+
+Every `screen` writes `atom_scores.jsonl` for all candidates before reference labeling. Each record gives the structure ID, 1-based atom index, element, signed Cartesian force difference `ΔF = F_A − F_B` and its component RMS `d_i = √[(ΔFx²+ΔFy²+ΔFz²)/3]` in eV/Å. `scores.jsonl` reports the atom with the largest `d_i` (first in input order for ties), its element, the maximum and the cell RMS `√[Σ_i d_i²/N]`. The historical cell variance `D_F` is the square of that cell RMS divided by 12.
+
+Optionally select a geometry when any atom exceeds a local threshold:
+
+```sh
+python pipeline.py screen predictions_a.jsonl predictions_b.jsonl --atom-force-cutoff 0.25 --out round-local
+```
+
+This threshold is in eV/Å. The four structure criteria still apply. A local exceedance adds `atom_force` to `triggered` and records **all** matching atom indices. When the option is set, ordering also accounts for the maximum local RMS divided by the local threshold. The original Ca–Fe–Ni selection used the four cell scores. No atomic cutoff is enabled by default.
+
+Consider a 64-atom illustration with zero total force difference. At one site the difference is `(0.60, 0, 0)` eV/Å. At each of the other 63 sites it is `(−0.60/63, 0, 0)` eV/Å. The component RMS is **0.346410 eV/Å** at the first site and **0.005499 eV/Å** at each of the others. The cell RMS is **0.043644 eV/Å**, and `D_F = 0.00015873 (eV/Å)²`, well below the historical cutoff of `0.01`. With identical scalar predictions, the optional `0.25 eV/Å` threshold selects the structure and identifies exactly one atom. `test_pipeline.py` reproduces this constructed example.
+
+After reference forces have been obtained, compare each prediction with the reference on the same sites:
+
+```sh
+python pipeline.py audit-forces predictions_a.jsonl predictions_b.jsonl returned.jsonl --out audit-01
+```
+
+`atom_errors.jsonl` gives both per-site force errors (component RMS) and the model with the larger error, with `tie` for equal values. Model A is the first prediction file. The audit examines labeled structures only and checks their cells, coordinates and atom order against both predictions. The example run from `demo.py` writes this comparison against its analytic reference in `demo-output/force-audit/`.
+
 ## Return reference labels and start the next round
 
 `to_label.jsonl` and `to_label.xyz` contain only the selected IDs and geometries. Run your reference code on these **fixed** cells and positions. For each completed calculation use the same JSONL fields as for a prediction and add a `reference_method` string identifying the calculation. Retain the original atom order. The existing training set uses the same schema and may be empty. Use consistent reference settings across rounds, including functional, pseudopotentials, energy zero and stress convention.

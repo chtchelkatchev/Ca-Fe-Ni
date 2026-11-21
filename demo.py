@@ -5,7 +5,7 @@ from math import exp
 from pathlib import Path
 from statistics import mean
 
-from pipeline import jsonlines, publish, screen, update, volume
+from pipeline import audit_forces, jsonlines, publish, screen, update, volume
 
 
 def dimer(r):
@@ -87,6 +87,7 @@ def run(out):
 
     # Only now call the teaching reference on exactly the identifiers selected above.
     publish(out / "returned", {"labels.jsonl": jsonlines(label(row) for row in chosen)})
+    audit_forces(a, b, out / "returned/labels.jsonl", out / "force-audit")
     training = update(out / "round-1/to_label.jsonl", out / "returned/labels.jsonl",
                       out / "seed/training.jsonl", out / "updated")
     new_models = fit_models(training)  # Both fits receive the same ordered reference records.
