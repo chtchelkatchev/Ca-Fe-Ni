@@ -60,4 +60,4 @@ The update checks IDs and geometries, rejects missing or unexpected labels and d
 
 ## Associated manuscript
 
-N. M. Chtchelkatchev, M. V. Magnitskaya and R. E. Ryltsev, *Active learning with two dissimilar interatomic potentials for the prediction of high-pressure Ca₆FeNi*. An [earlier version of the manuscript](https://arxiv.org/abs/2606.30870) describes the Ca–Fe–Ni search.
+N. M. Chtchelkatchev, M. V. Magnitskaya and R. E. Ryltsev, *Disagreement between two interatomic potentials guides active learning in evolutionary crystal structure searches*. An [earlier version of the manuscript](https://arxiv.org/abs/2606.30870) describes the Ca–Fe–Ni search.
